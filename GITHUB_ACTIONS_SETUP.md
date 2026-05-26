@@ -110,7 +110,8 @@ After pushing the files to GitHub:
 
 Manual runs skip the 5:30 AM time gate. Scheduled runs use the time gate so the
 two UTC cron entries do not send duplicate emails across daylight-saving
-changes.
+changes. The default `lookback_days` value is `0`, so the workflow collects only
+items dated today in America/New_York local time.
 
 ## Local Dry Run
 
@@ -119,7 +120,7 @@ variables, and run:
 
 ```powershell
 python -m pip install -r requirements.txt
-python scripts\daily_news_digest.py --lookback-days 2 --allow-fallback
+python scripts\daily_news_digest.py --lookback-days 0 --allow-fallback
 ```
 
 Without `--send`, the script writes the digest to `outputs/` but does not email

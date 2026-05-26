@@ -30,9 +30,10 @@ from xml.etree import ElementTree
 import requests
 
 try:
-    from zoneinfo import ZoneInfo
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 except ImportError:  # pragma: no cover
     ZoneInfo = None
+    ZoneInfoNotFoundError = Exception
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -290,10 +291,26 @@ def parse_datetime(value: str) -> datetime | None:
     return None
 
 
+def local_timezone() -> timezone | ZoneInfo:
+    if ZoneInfo is None:
+        return timezone.utc
+    try:
+        return ZoneInfo(LOCAL_TZ)
+    except ZoneInfoNotFoundError:
+        return timezone.utc
+
+
 def date_window(start_date: str, end_date: str) -> tuple[datetime, datetime]:
-    start = datetime.combine(date.fromisoformat(start_date), datetime_time.min, timezone.utc)
-    end = datetime.combine(date.fromisoformat(end_date) + timedelta(days=1), datetime_time.min, timezone.utc)
-    return start, end
+    tz = local_timezone()
+    start_local = datetime.combine(date.fromisoformat(start_date), datetime_time.min, tz)
+    end_local = datetime.combine(date.fromisoformat(end_date) + timedelta(days=1), datetime_time.min, tz)
+    return start_local.astimezone(timezone.utc), end_local.astimezone(timezone.utc)
+
+
+def local_date_text(value: datetime | None, raw_date: str) -> str:
+    if value is None:
+        return normalize_space(raw_date)
+    return value.astimezone(local_timezone()).date().isoformat()
 
 
 def item_in_window(
@@ -400,7 +417,7 @@ def parse_feed_items(
 
         summary = child_text(entry, ["description", "summary", "subtitle", "encoded", "content"])
         summary = compact(strip_markup(summary), 700)
-        date_text = published.date().isoformat() if published else normalize_space(raw_date)
+        date_text = local_date_text(published, raw_date)
         authors = item_authors(entry)
 
         out.append(
@@ -860,7 +877,12 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--send", action="store_true", help="Send the digest by Gmail SMTP.")
     parser.add_argument("--time-gate", action="store_true", help="Only run during the target local hour.")
-    parser.add_argument("--lookback-days", type=int, default=int(env("LOOKBACK_DAYS", "2")))
+    parser.add_argument(
+        "--lookback-days",
+        type=int,
+        default=int(env("LOOKBACK_DAYS", "0")),
+        help="How many previous local calendar days to include. Use 0 for today only.",
+    )
     parser.add_argument("--allow-fallback", action="store_true", help="Send a metadata-only digest if OpenAI is unavailable.")
     return parser.parse_args()
 
@@ -876,13 +898,14 @@ def main() -> int:
     config = load_digest_config()
     now_local = datetime.now(ZoneInfo(LOCAL_TZ)) if ZoneInfo else datetime.now()
     end = now_local.date()
-    start = end - timedelta(days=max(args.lookback_days, 1))
+    lookback_days = max(args.lookback_days, 0)
+    start = end - timedelta(days=lookback_days)
     start_date = start.isoformat()
     end_date = end.isoformat()
 
     sent_keys, sent_title_keys = load_state()
     candidates = dedupe_candidates(
-        collect_candidates(start_date, end_date, sender, config, max(args.lookback_days, 1)),
+        collect_candidates(start_date, end_date, sender, config, max(lookback_days, 1)),
         sent_keys,
         sent_title_keys,
     )

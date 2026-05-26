@@ -8,9 +8,9 @@ on:
   workflow_dispatch:
     inputs:
       lookback_days:
-        description: "How many days of recent news to collect"
+        description: "How many previous local calendar days to include; 0 means today only"
         required: false
-        default: "2"
+        default: "0"
 
 permissions:
   contents: read
@@ -53,7 +53,7 @@ jobs:
           GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           DIGEST_RECIPIENT: ${{ secrets.DIGEST_RECIPIENT }}
-          LOOKBACK_DAYS: ${{ github.event.inputs.lookback_days || '2' }}
+          LOOKBACK_DAYS: ${{ github.event.inputs.lookback_days || '0' }}
         run: |
           args="--send --lookback-days ${LOOKBACK_DAYS}"
           if [ "${{ github.event_name }}" = "schedule" ]; then
