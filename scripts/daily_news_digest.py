@@ -693,6 +693,7 @@ Hard requirements:
 - Mention the coverage window: {start_date} to {end_date}, generated on {today}.
 - Keep the digest useful for a reader who wants broad situational awareness across politics, business, technology, science, health, climate, law, culture, and sports.
 - Preserve the section structure from the private digest configuration.
+- Follow any digest-level selection or priority policy in the private digest configuration.
 - Within each section, group or label items by outlet when useful.
 - Include source outlet, date, and link for each item.
 - Avoid duplicates across outlets. If several outlets cover the same story, write one compact synthesis and cite the outlets/links that appear in the supplied candidates.
@@ -866,10 +867,21 @@ def send_email(subject: str, body: str, sender: str, recipient: str, app_passwor
 
 
 def should_run_time_gate() -> bool:
-    if ZoneInfo is None:
-        return True
-    now = datetime.now(ZoneInfo(LOCAL_TZ))
+    now = datetime.now(local_timezone())
     target_hour = int(env("TARGET_LOCAL_HOUR", "5"))
+    target_minute = int(env("TARGET_LOCAL_MINUTE", "30"))
+    event_schedule = normalize_space(env("GITHUB_EVENT_SCHEDULE") or env("GITHUB_SCHEDULE"))
+
+    if event_schedule:
+        target_local = datetime.combine(
+            now.date(),
+            datetime_time(target_hour, target_minute),
+            now.tzinfo,
+        )
+        target_utc = target_local.astimezone(timezone.utc)
+        expected_schedule = f"{target_utc.minute} {target_utc.hour} * * *"
+        return event_schedule == expected_schedule
+
     return now.hour == target_hour
 
 

@@ -108,10 +108,10 @@ After pushing the files to GitHub:
 3. Select `Daily News Digest`.
 4. Click `Run workflow`.
 
-Manual runs skip the 5:30 AM time gate. Scheduled runs use the time gate so the
-two UTC cron entries do not send duplicate emails across daylight-saving
-changes. The default `lookback_days` value is `0`, so the workflow collects only
-items dated today in America/New_York local time.
+Manual runs skip the 5:30 AM time gate. Scheduled runs pass their UTC cron value
+to the script, and the script chooses the one that maps to 5:30 AM
+America/New_York for that date. The default `lookback_days` value is `0`, so the
+workflow collects only items dated today in America/New_York local time.
 
 ## Local Dry Run
 

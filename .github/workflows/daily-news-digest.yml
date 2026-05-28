@@ -2,9 +2,10 @@ name: Daily News Digest
 
 on:
   schedule:
-    # GitHub Actions uses UTC. Running at both 09:30 and 10:30 UTC lets the
-    # script hit 5:30 AM America/New_York across daylight-saving changes.
-    - cron: "30 9,10 * * *"
+    # GitHub Actions uses UTC. The script chooses the active schedule for
+    # America/New_York so daylight-saving changes do not produce duplicates.
+    - cron: "30 9 * * *"
+    - cron: "30 10 * * *"
   workflow_dispatch:
     inputs:
       lookback_days:
@@ -54,6 +55,7 @@ jobs:
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           DIGEST_RECIPIENT: ${{ secrets.DIGEST_RECIPIENT }}
           LOOKBACK_DAYS: ${{ github.event.inputs.lookback_days || '0' }}
+          GITHUB_EVENT_SCHEDULE: ${{ github.event.schedule }}
         run: |
           args="--send --lookback-days ${LOOKBACK_DAYS}"
           if [ "${{ github.event_name }}" = "schedule" ]; then
