@@ -11,7 +11,7 @@ when testing.
 - Collects recent RSS/Atom items from the configured sources.
 - Uses Google News RSS as a fallback when a configured source does not expose a
   stable public RSS feed.
-- Uses the OpenAI API by default to write a bilingual English-then-Chinese email digest.
+- Uses the OpenAI API by default to write a Simplified Chinese email digest.
 - Can optionally use Anthropic Claude by setting `MODEL_PROVIDER=anthropic`.
 - Sends the digest through Gmail SMTP using the sender and recipient stored in
   GitHub Secrets.

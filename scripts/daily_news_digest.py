@@ -20,6 +20,7 @@ import sys
 import time
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, time as datetime_time, timedelta, timezone
+from email.header import Header
 from email.mime.text import MIMEText
 from email.utils import parsedate_to_datetime
 from pathlib import Path
@@ -46,7 +47,7 @@ DEFAULT_MODEL_PROVIDER = "openai"
 DEFAULT_OPENAI_MODEL = "gpt-5-mini"
 DEFAULT_ANTHROPIC_MODEL = "claude-haiku-4-5"
 DEFAULT_ANTHROPIC_VERSION = "2023-06-01"
-DEFAULT_DIGEST_LANGUAGE = "Bilingual: English first, followed by Simplified Chinese translation"
+DEFAULT_DIGEST_LANGUAGE = "Simplified Chinese"
 DEFAULT_GOOGLE_NEWS_HL = "en-US"
 DEFAULT_GOOGLE_NEWS_GL = "US"
 DEFAULT_GOOGLE_NEWS_CEID = "US:en"
@@ -150,6 +151,19 @@ def model_provider(config: dict[str, Any]) -> str:
     provider = env("MODEL_PROVIDER", str(config.get("model_provider") or DEFAULT_MODEL_PROVIDER))
     provider = normalize_space(provider).lower()
     return "anthropic" if provider == "claude" else provider
+
+
+def configured_model_name(config: dict[str, Any]) -> str:
+    provider = model_provider(config)
+    if provider == "openai":
+        return env("OPENAI_MODEL", DEFAULT_OPENAI_MODEL)
+    if provider == "anthropic":
+        return env("ANTHROPIC_MODEL", DEFAULT_ANTHROPIC_MODEL)
+    return provider
+
+
+def digest_subject(start_date: str, end_date: str, generated_date: str, model_name: str) -> str:
+    return f"Daily News Digest (coverage {start_date} → {end_date}) — generated {generated_date} by {model_name}"
 
 
 def include_google_news_fallbacks(config: dict[str, Any]) -> bool:
@@ -680,13 +694,13 @@ def build_digest_prompt(
         "final_section_instruction",
         "End with the most important 8 to 10 items to read first.",
     )
+    subject = digest_subject(start_date, end_date, today, configured_model_name(config))
     return f"""
 You are preparing an email-ready daily news digest.
 
 Hard requirements:
-- Write the digest in {language}.
-- For every subject line, section heading, story summary, and final highlight, put the English version first, then put the Simplified Chinese translation immediately underneath it.
-- Use this compact bilingual pattern for each story: English headline/summary/link first, then Chinese translation/summary/link below. Do not mix English and Chinese inside the same sentence unless it is a proper noun or title.
+- Write the digest in {language}. Keep outlet names, article titles, organizations, products, laws, and other proper nouns in their original language when that is clearer.
+- Use this exact Subject line and do not rewrite it: {subject}
 - Use only the candidate records supplied below. Do not invent facts, links, dates, outlets, or article details.
 - Treat feed descriptions as metadata only. Paraphrase; do not copy long source descriptions verbatim.
 - Include a concise Subject line, From line, and To line.
@@ -813,11 +827,12 @@ def fallback_digest(
     recipient: str,
     config: dict[str, Any],
 ) -> str:
-    subject_prefix = "Daily News Digest / 每日新闻简报"
-    no_items = "No newly discovered candidate records.\n没有抓到新的候选新闻。"
-    fallback_note = "AI summarization was unavailable; review the candidate records above.\nAI 总结暂不可用，请先查看上面的候选新闻。"
+    generated_date = datetime.now(timezone.utc).date().isoformat()
+    subject = digest_subject(start_date, end_date, generated_date, configured_model_name(config))
+    no_items = "没有抓到新的候选新闻。"
+    fallback_note = "AI 总结暂不可用，请先查看上面的候选新闻。"
     lines = [
-        f"Subject: {subject_prefix} - {start_date} to {end_date}",
+        f"Subject: {subject}",
         f"From: {sender}",
         f"To: {recipient}",
         "",
@@ -847,13 +862,20 @@ def extract_subject(body: str, start_date: str, end_date: str) -> str:
     return f"Daily News Digest - {start_date} to {end_date}"
 
 
+def strip_subject_line(body: str) -> str:
+    lines = body.splitlines()
+    if lines and lines[0].lower().startswith("subject:"):
+        return "\n".join(lines[1:]).lstrip()
+    return body
+
+
 def send_email(subject: str, body: str, sender: str, recipient: str, app_password: str) -> None:
     password = app_password.replace(" ", "").strip()
     if not password:
         raise RuntimeError("GMAIL_APP_PASSWORD is missing. Add it to GitHub repository secrets.")
 
     msg = MIMEText(body, "plain", "utf-8")
-    msg["Subject"] = subject
+    msg["Subject"] = str(Header(subject, "utf-8"))
     msg["From"] = sender
     msg["To"] = recipient
 
@@ -932,14 +954,15 @@ def main() -> int:
         log_warning(f"AI summarization unavailable, using fallback digest. error={safe_runtime_error_message(exc)}")
         body = fallback_digest(candidates, start_date, end_date, sender, recipient, config)
 
+    generated_date = datetime.now(timezone.utc).date().isoformat()
+    subject = digest_subject(start_date, end_date, generated_date, configured_model_name(config))
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     output_path = OUTPUT_DIR / f"daily_news_digest_{end_date}.txt"
-    output_path.write_text(body + "\n", encoding="utf-8")
+    output_path.write_text(f"Subject: {subject}\n{strip_subject_line(body)}\n", encoding="utf-8")
     log_info("Wrote digest output file.")
 
     if args.send:
-        subject = extract_subject(body, start_date, end_date)
-        send_email(subject, body, sender, recipient, env("GMAIL_APP_PASSWORD"))
+        send_email(subject, strip_subject_line(body), sender, recipient, env("GMAIL_APP_PASSWORD"))
         log_info("Sent digest email.")
         save_state(sent_keys, sent_title_keys, candidates, datetime.now(timezone.utc).isoformat())
     else:
