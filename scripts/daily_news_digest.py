@@ -224,6 +224,17 @@ def compact(text: str, limit: int = 700) -> str:
     return text if len(text) <= limit else text[: limit - 3].rstrip() + "..."
 
 
+def is_google_news_url(url: str) -> bool:
+    return "news.google.com/rss/articles/" in url or "news.google.com/articles/" in url
+
+
+def display_candidate_link(url: str) -> str:
+    url = normalize_space(url)
+    if not url or is_google_news_url(url):
+        return "略"
+    return url
+
+
 def local_name(tag: str) -> str:
     return tag.rsplit("}", 1)[-1] if "}" in tag else tag
 
@@ -675,6 +686,9 @@ def candidate_payload(candidates: list[Candidate]) -> str:
         item["key"] = candidate.key
         item["title_key"] = candidate.title_key
         item["summary"] = compact(item.get("summary", ""), 900)
+        if is_google_news_url(item.get("url", "")):
+            item["url"] = ""
+            item["link_note"] = "Google News fallback redirect omitted; do not print the omitted URL."
         payload.append(item)
     return json.dumps(payload, ensure_ascii=True, indent=2)
 
@@ -699,7 +713,7 @@ def build_digest_prompt(
 You are preparing an email-ready daily news digest.
 
 Hard requirements:
-- Write the digest in {language}. Keep outlet names, article titles, organizations, products, laws, and other proper nouns in their original language when that is clearer.
+- Write the digest in {language}. Translate headlines and summaries into natural Simplified Chinese; keep outlet names, organizations, products, laws, and other proper nouns in their original language when that is clearer.
 - Use this exact Subject line and do not rewrite it: {subject}
 - Use only the candidate records supplied below. Do not invent facts, links, dates, outlets, or article details.
 - Treat feed descriptions as metadata only. Paraphrase; do not copy long source descriptions verbatim.
@@ -710,6 +724,10 @@ Hard requirements:
 - Follow any digest-level selection or priority policy in the private digest configuration.
 - Within each section, group or label items by outlet when useful.
 - Include source outlet, date, and link for each item.
+- Use compact one-bullet story entries, preferably: "- 中文标题（来源，日期）：一句中文摘要。链接：URL/略".
+- Do not add separate English summaries, separate "Summary:" lines, or separate "中文：" translation lines.
+- Do not add section prefaces such as "(Selected ...)".
+- If a candidate has no URL or says a Google News fallback redirect was omitted, write "链接：略"; do not invent or reconstruct the URL.
 - Avoid duplicates across outlets. If several outlets cover the same story, write one compact synthesis and cite the outlets/links that appear in the supplied candidates.
 - Prefer concise analytical summaries over raw headline dumps.
 - If a section has no supplied records, say briefly that no fresh items were found for that section.
@@ -846,8 +864,8 @@ def fallback_digest(
             lines.append(no_items)
             continue
         for c in items[: section_cap(section_config)]:
-            note = compact(c.summary or c.why_candidate, 220)
-            lines.append(f"- [{c.outlet}] {c.title}. {c.date}. {c.url}. Note: {note}")
+            note = compact(c.summary or c.why_candidate, 140)
+            lines.append(f"- {c.title}（{c.outlet}，{c.date}）：{note}。链接：{display_candidate_link(c.url)}")
     final_title = config.get("final_section_title", "Top Reads Today")
     lines.extend(["", final_title, "", fallback_note])
     return "\n".join(lines)
