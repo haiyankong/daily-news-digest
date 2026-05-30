@@ -230,9 +230,14 @@ def is_google_news_url(url: str) -> bool:
 
 def display_candidate_link(url: str) -> str:
     url = normalize_space(url)
-    if not url or is_google_news_url(url):
-        return "略"
+    if not url or is_google_news_url(url) or len(url) > 180:
+        return ""
     return url
+
+
+def link_suffix(url: str) -> str:
+    display_url = display_candidate_link(url)
+    return f" 链接：{display_url}" if display_url else ""
 
 
 def local_name(tag: str) -> str:
@@ -688,7 +693,6 @@ def candidate_payload(candidates: list[Candidate]) -> str:
         item["summary"] = compact(item.get("summary", ""), 900)
         if is_google_news_url(item.get("url", "")):
             item["url"] = ""
-            item["link_note"] = "Google News fallback redirect omitted; do not print the omitted URL."
         payload.append(item)
     return json.dumps(payload, ensure_ascii=True, indent=2)
 
@@ -713,21 +717,22 @@ def build_digest_prompt(
 You are preparing an email-ready daily news digest.
 
 Hard requirements:
-- Write the digest in {language}. Translate headlines and summaries into natural Simplified Chinese; keep outlet names, organizations, products, laws, and other proper nouns in their original language when that is clearer.
+- Write the digest body in Simplified Chinese only. Translate candidate headlines and summaries into natural Simplified Chinese; keep outlet names, organizations, products, laws, and other proper nouns in their original language only when necessary.
+- Do not output separate English headlines, English summaries, "Summary:" lines, "Link:" lines, or "中文：" translation lines.
 - Use this exact Subject line and do not rewrite it: {subject}
 - Use only the candidate records supplied below. Do not invent facts, links, dates, outlets, or article details.
 - Treat feed descriptions as metadata only. Paraphrase; do not copy long source descriptions verbatim.
 - Include a concise Subject line, From line, and To line.
-- Mention the coverage window: {start_date} to {end_date}, generated on {today}.
+- Mention the coverage window in Chinese: {start_date} to {end_date}, generated on {today}.
 - Keep the digest useful for a reader who wants broad situational awareness across politics, business, technology, science, health, climate, law, culture, and sports.
 - Preserve the section structure from the private digest configuration.
 - Follow any digest-level selection or priority policy in the private digest configuration.
 - Within each section, group or label items by outlet when useful.
-- Include source outlet, date, and link for each item.
-- Use compact one-bullet story entries, preferably: "- 中文标题（来源，日期）：一句中文摘要。链接：URL/略".
-- Do not add separate English summaries, separate "Summary:" lines, or separate "中文：" translation lines.
+- Include source outlet and date for each item. Include a link only when a non-empty URL is supplied.
+- Use exactly one compact Chinese bullet per story, preferably: "- 中文标题（来源，日期）：一句中文摘要。链接：URL".
+- If a candidate has no URL, omit the link field entirely. Never write "Link: 略", "链接：略", "link omitted", or any equivalent placeholder.
 - Do not add section prefaces such as "(Selected ...)".
-- If a candidate has no URL or says a Google News fallback redirect was omitted, write "链接：略"; do not invent or reconstruct the URL.
+- Do not invent, reconstruct, or print Google News fallback URLs.
 - Avoid duplicates across outlets. If several outlets cover the same story, write one compact synthesis and cite the outlets/links that appear in the supplied candidates.
 - Prefer concise analytical summaries over raw headline dumps.
 - If a section has no supplied records, say briefly that no fresh items were found for that section.
@@ -865,7 +870,7 @@ def fallback_digest(
             continue
         for c in items[: section_cap(section_config)]:
             note = compact(c.summary or c.why_candidate, 140)
-            lines.append(f"- {c.title}（{c.outlet}，{c.date}）：{note}。链接：{display_candidate_link(c.url)}")
+            lines.append(f"- {c.title}（{c.outlet}，{c.date}）：{note}。{link_suffix(c.url)}")
     final_title = config.get("final_section_title", "Top Reads Today")
     lines.extend(["", final_title, "", fallback_note])
     return "\n".join(lines)
