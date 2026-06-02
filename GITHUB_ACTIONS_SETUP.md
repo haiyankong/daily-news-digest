@@ -15,8 +15,8 @@ when testing.
 - Can optionally use Anthropic Claude by setting `MODEL_PROVIDER=anthropic`.
 - Sends the digest through Gmail SMTP using the sender and recipient stored in
   GitHub Secrets.
-- Keeps a small sent-item state file during a run to reduce duplicate pushes
-  when the same story appears through more than one feed.
+- Uses an Actions cache with compact sent-item fingerprints to reduce repeat
+  entries across runs.
 
 ## Required GitHub Secrets
 
@@ -94,6 +94,9 @@ INCLUDE_GOOGLE_NEWS_FALLBACKS=true
 MAX_OUTPUT_TOKENS=9000
 OPENAI_MAX_OUTPUT_TOKENS=9000
 ANTHROPIC_MAX_OUTPUT_TOKENS=9000
+MODEL_API_TIMEOUT_SECONDS=300
+MODEL_API_RETRIES=3
+MODEL_API_RETRY_DELAY_SECONDS=10
 ```
 
 The section-level `candidate_cap` values inside `DIGEST_CONFIG_JSON` take
@@ -135,5 +138,7 @@ OpenAI API call is unavailable.
   a source does not expose a stable public feed.
 - GitHub Actions schedule times are not guaranteed to start at the exact minute;
   a small delay is normal.
+- A small Actions cache is used to reduce repeat entries across runs. Cache
+  entries may expire, so occasional repeats can still happen.
 - To change the delivery address later, update only the `DIGEST_RECIPIENT`
   secret.

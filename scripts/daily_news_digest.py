@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import html
 import json
 import os
@@ -147,6 +148,18 @@ def max_output_tokens() -> int:
     return int(env("MAX_OUTPUT_TOKENS", "9000"))
 
 
+def model_api_timeout_seconds() -> int:
+    return int(env("MODEL_API_TIMEOUT_SECONDS", "300"))
+
+
+def model_api_retries() -> int:
+    return max(int(env("MODEL_API_RETRIES", "3")), 1)
+
+
+def model_api_retry_delay_seconds(attempt: int) -> int:
+    return int(env("MODEL_API_RETRY_DELAY_SECONDS", "10")) * attempt
+
+
 def model_provider(config: dict[str, Any]) -> str:
     provider = env("MODEL_PROVIDER", str(config.get("model_provider") or DEFAULT_MODEL_PROVIDER))
     provider = normalize_space(provider).lower()
@@ -164,6 +177,50 @@ def configured_model_name(config: dict[str, Any]) -> str:
 
 def digest_subject(start_date: str, end_date: str, generated_date: str, model_name: str) -> str:
     return f"Daily News Digest (coverage {start_date} → {end_date}) — generated {generated_date} by {model_name}"
+
+
+def transient_model_status(status_code: int) -> bool:
+    return status_code in {408, 409, 429, 500, 502, 503, 504}
+
+
+def model_response_error(provider: str, response: requests.Response) -> RuntimeError:
+    request_id = response.headers.get("x-request-id") or response.headers.get("request-id")
+    suffix = f" request_id={request_id}" if request_id else ""
+    return RuntimeError(f"{provider} API error {response.status_code}.{suffix}")
+
+
+def post_model_json(provider: str, url: str, headers: dict[str, str], payload: dict[str, Any]) -> dict[str, Any]:
+    attempts = model_api_retries()
+    timeout = model_api_timeout_seconds()
+
+    for attempt in range(1, attempts + 1):
+        try:
+            response = requests.post(url, headers=headers, json=payload, timeout=timeout)
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
+            if attempt >= attempts:
+                raise RuntimeError(
+                    f"{provider} request failed after {attempts} attempts: {safe_exception_label(exc)}"
+                ) from None
+            log_warning(
+                f"{provider} request attempt {attempt}/{attempts} failed. error={safe_exception_label(exc)}; retrying."
+            )
+            time.sleep(model_api_retry_delay_seconds(attempt))
+            continue
+        except requests.exceptions.RequestException as exc:
+            raise RuntimeError(f"{provider} request failed. error={safe_exception_label(exc)}") from None
+
+        if response.status_code >= 400:
+            if transient_model_status(response.status_code) and attempt < attempts:
+                log_warning(
+                    f"{provider} API transient error attempt {attempt}/{attempts}. status={response.status_code}; retrying."
+                )
+                time.sleep(model_api_retry_delay_seconds(attempt))
+                continue
+            raise model_response_error(provider, response)
+
+        return response.json()
+
+    raise RuntimeError(f"{provider} request failed after {attempts} attempts.")
 
 
 def include_google_news_fallbacks(config: dict[str, Any]) -> bool:
@@ -512,13 +569,22 @@ def load_state() -> tuple[set[str], set[str]]:
     except Exception:
         return set(), set()
 
-    keys = {str(item.get("key", "")) for item in data.get("items", []) if item.get("key")}
-    title_keys = {
-        str(item.get("title_key", ""))
-        for item in data.get("items", [])
-        if item.get("title_key")
-    }
+    keys = set()
+    title_keys = set()
+    for item in data.get("items", []):
+        if item.get("key_hash"):
+            keys.add(str(item["key_hash"]))
+        elif item.get("key"):
+            keys.add(candidate_key_hash(str(item["key"])))
+        if item.get("title_key_hash"):
+            title_keys.add(str(item["title_key_hash"]))
+        elif item.get("title_key"):
+            title_keys.add(candidate_key_hash(str(item["title_key"])))
     return keys, title_keys
+
+
+def candidate_key_hash(key: str) -> str:
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()
 
 
 def save_state(sent_keys: set[str], sent_title_keys: set[str], new_items: list[Candidate], now_iso: str) -> None:
@@ -526,22 +592,35 @@ def save_state(sent_keys: set[str], sent_title_keys: set[str], new_items: list[C
     if STATE_PATH.exists():
         try:
             for item in json.loads(STATE_PATH.read_text(encoding="utf-8")).get("items", []):
-                if item.get("key"):
-                    existing[item["key"]] = item
+                key_hash = ""
+                if item.get("key_hash"):
+                    key_hash = str(item["key_hash"])
+                elif item.get("key"):
+                    key_hash = candidate_key_hash(str(item["key"]))
+                if key_hash:
+                    title_key_hash = ""
+                    if item.get("title_key_hash"):
+                        title_key_hash = str(item["title_key_hash"])
+                    elif item.get("title_key"):
+                        title_key_hash = candidate_key_hash(str(item["title_key"]))
+                    existing[key_hash] = {
+                        "key_hash": key_hash,
+                        "title_key_hash": title_key_hash,
+                        "sent_at": item.get("sent_at", ""),
+                    }
         except Exception:
             existing = {}
 
     for candidate in new_items:
-        existing[candidate.key] = {
-            "key": candidate.key,
-            "title_key": candidate.title_key,
-            "title": candidate.title,
-            "outlet": candidate.outlet,
-            "date": candidate.date,
+        key_hash = candidate_key_hash(candidate.key)
+        title_key_hash = candidate_key_hash(candidate.title_key)
+        existing[key_hash] = {
+            "key_hash": key_hash,
+            "title_key_hash": title_key_hash,
             "sent_at": now_iso,
         }
-        sent_keys.add(candidate.key)
-        sent_title_keys.add(candidate.title_key)
+        sent_keys.add(key_hash)
+        sent_title_keys.add(title_key_hash)
 
     trimmed = sorted(existing.values(), key=lambda x: x.get("sent_at", ""), reverse=True)[:2500]
     STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -559,12 +638,14 @@ def dedupe_candidates(
     for candidate in candidates:
         if not candidate.title:
             continue
-        if candidate.key in seen_keys or candidate.key in sent_keys:
+        key_hash = candidate_key_hash(candidate.key)
+        title_key_hash = candidate_key_hash(candidate.title_key)
+        if key_hash in seen_keys or key_hash in sent_keys:
             continue
-        if candidate.title_key in seen_titles or candidate.title_key in sent_title_keys:
+        if title_key_hash in seen_titles or title_key_hash in sent_title_keys:
             continue
-        seen_keys.add(candidate.key)
-        seen_titles.add(candidate.title_key)
+        seen_keys.add(key_hash)
+        seen_titles.add(title_key_hash)
         out.append(candidate)
     return out
 
@@ -741,7 +822,7 @@ Hard requirements:
 From: {sender}
 To: {recipient}
 
-Private digest configuration:
+Digest configuration, for rules only; do not quote it directly:
 {json.dumps(config, ensure_ascii=True, indent=2)}
 
 Candidate records:
@@ -756,24 +837,19 @@ def compose_with_openai(prompt: str) -> str:
 
     model = env("OPENAI_MODEL", DEFAULT_OPENAI_MODEL)
     output_tokens = int(env("OPENAI_MAX_OUTPUT_TOKENS", str(max_output_tokens())))
-    response = requests.post(
+    data = post_model_json(
+        "OpenAI",
         "https://api.openai.com/v1/responses",
-        headers={
+        {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         },
-        json={
+        {
             "model": model,
             "input": prompt,
             "max_output_tokens": output_tokens,
         },
-        timeout=120,
     )
-    if response.status_code >= 400:
-        request_id = response.headers.get("x-request-id") or response.headers.get("request-id")
-        suffix = f" request_id={request_id}" if request_id else ""
-        raise RuntimeError(f"OpenAI API error {response.status_code}.{suffix}")
-    data = response.json()
     if data.get("output_text"):
         return data["output_text"].strip()
 
@@ -795,26 +871,20 @@ def compose_with_anthropic(prompt: str) -> str:
 
     model = env("ANTHROPIC_MODEL", DEFAULT_ANTHROPIC_MODEL)
     output_tokens = int(env("ANTHROPIC_MAX_OUTPUT_TOKENS", str(max_output_tokens())))
-    response = requests.post(
+    data = post_model_json(
+        "Anthropic",
         "https://api.anthropic.com/v1/messages",
-        headers={
+        {
             "x-api-key": api_key,
             "anthropic-version": env("ANTHROPIC_VERSION", DEFAULT_ANTHROPIC_VERSION),
             "Content-Type": "application/json",
         },
-        json={
+        {
             "model": model,
             "max_tokens": output_tokens,
             "messages": [{"role": "user", "content": prompt}],
         },
-        timeout=120,
     )
-    if response.status_code >= 400:
-        request_id = response.headers.get("request-id") or response.headers.get("x-request-id")
-        suffix = f" request_id={request_id}" if request_id else ""
-        raise RuntimeError(f"Anthropic API error {response.status_code}.{suffix}")
-
-    data = response.json()
     chunks = []
     for content in data.get("content", []):
         if content.get("type") == "text" and content.get("text"):
@@ -911,45 +981,21 @@ def send_email(subject: str, body: str, sender: str, recipient: str, app_passwor
         smtp.sendmail(sender, [recipient], msg.as_string())
 
 
-def should_run_time_gate() -> bool:
-    now = datetime.now(local_timezone())
-    target_hour = int(env("TARGET_LOCAL_HOUR", "5"))
-    target_minute = int(env("TARGET_LOCAL_MINUTE", "30"))
-    event_schedule = normalize_space(env("GITHUB_EVENT_SCHEDULE") or env("GITHUB_SCHEDULE"))
-
-    if event_schedule:
-        target_local = datetime.combine(
-            now.date(),
-            datetime_time(target_hour, target_minute),
-            now.tzinfo,
-        )
-        target_utc = target_local.astimezone(timezone.utc)
-        expected_schedule = f"{target_utc.minute} {target_utc.hour} * * *"
-        return event_schedule == expected_schedule
-
-    return now.hour == target_hour
-
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--send", action="store_true", help="Send the digest by Gmail SMTP.")
-    parser.add_argument("--time-gate", action="store_true", help="Only run during the target local hour.")
     parser.add_argument(
         "--lookback-days",
         type=int,
         default=int(env("LOOKBACK_DAYS", "0")),
         help="How many previous local calendar days to include. Use 0 for today only.",
     )
-    parser.add_argument("--allow-fallback", action="store_true", help="Send a metadata-only digest if OpenAI is unavailable.")
+    parser.add_argument("--allow-fallback", action="store_true", help="Send a metadata-only digest if the model API is unavailable.")
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
-    if args.time_gate and not should_run_time_gate():
-        log_info(f"Skipping: current {LOCAL_TZ} time is outside the target local hour.")
-        return 0
-
     sender = required_env("GMAIL_ADDRESS")
     recipient = required_env("DIGEST_RECIPIENT")
     config = load_digest_config()
@@ -961,6 +1007,8 @@ def main() -> int:
     end_date = end.isoformat()
 
     sent_keys, sent_title_keys = load_state()
+    if STATE_PATH.exists():
+        save_state(sent_keys, sent_title_keys, [], datetime.now(timezone.utc).isoformat())
     candidates = dedupe_candidates(
         collect_candidates(start_date, end_date, sender, config, max(lookback_days, 1)),
         sent_keys,
